@@ -133,11 +133,13 @@ def bayes_train(args, model, device, train_loader, optimizer, epoch):
         y_prob = 0
         for t in range(args.T):
             y_pred, s_pred = model(data)
+
             # Gaussian noise (reparameterize)
             y_noised = reparameterize(y_pred, s_pred)
-            y_prob += F.softmax(y_noised, dim=1)
-        y_prob /= args.T
 
+            y_prob += F.softmax(y_noised, dim=1)
+
+        y_prob /= args.T
         # loss = F.cross_entropy(y_noised, target)
         loss = F.nll_loss(torch.log(y_prob), target)
         loss.backward()
@@ -165,11 +167,13 @@ def bayes_test(args, model, device, test_loader, prompt='Test'):
             y_prob = 0
             for t in range(args.T):
                 y_pred, s_pred = model(data)
+
                 # Gaussian noise (reparameterize)
                 y_noised = reparameterize(y_pred, s_pred)
-                y_prob += F.softmax(y_noised, dim=1)
-            y_prob /= args.T
 
+                y_prob += F.softmax(y_noised, dim=1)
+
+            y_prob /= args.T
             # test_loss += F.cross_entropy(y_noised, target, reduction='sum').item()  # sum up batch loss
             test_loss += F.nll_loss(torch.log(y_prob), target, reduction='sum').item()
             pred = y_noised.argmax(dim=1, keepdim=True)  # get the index of the max log-probability
@@ -189,6 +193,9 @@ def bayes_test(args, model, device, test_loader, prompt='Test'):
 def bayes_train_da(args, model, device, train_loader, target_loader, optimizer, epoch):
     model.train()
     target_iter = iter(target_loader)
+    print('-------------')
+    print(len(target_iter))
+    print(len(target_loader))
 
     alpha = 2. / (1. + np.exp(-10 * epoch/args.epochs)) - 1
 
@@ -197,71 +204,61 @@ def bayes_train_da(args, model, device, train_loader, target_loader, optimizer, 
         optimizer.zero_grad()
 
         y_prob = 0
-        std_source = 0
         for t in range(args.T):
             y_pred, s_pred = model(data)
-            y_noised = reparameterize(y_pred, s_pred)
-            y_prob += F.softmax(y_noised, dim=1)
-            std_source += torch.exp(0.5 * s_pred)
-        y_prob /= args.T
-        std_source /= args.T
 
+            # Gaussian noise (reparameterize)
+            y_noised = reparameterize(y_pred, s_pred)
+
+            y_prob += F.softmax(y_noised, dim=1)
+
+        y_prob /= args.T
         # loss = F.cross_entropy(y_noised, target)
         loss_nll = F.nll_loss(torch.log(y_prob), target)
 
         # entropy on train data
-        entropy_source = -torch.sum(y_prob * torch.log(y_prob), dim=1).mean()
+        entropy_source = -torch.sum(y_prob * torch.log(y_prob), dim=1)
 
         # entropy on target data
         if batch_idx >= len(target_loader):
             target_iter = iter(target_loader)
         data_target, _ = target_iter.next()
-        data_target = data_target.to(device)
 
+        data_target = data_target.to(device)
         y_prob = 0
-        std_target = 0
         for t in range(args.T):
             y_pred, s_pred = model(data_target)
             y_noised = reparameterize(y_pred, s_pred)
             y_prob += F.softmax(y_noised, dim=1)
-            std_target += torch.exp(0.5 * s_pred)
-        y_prob /= args.T
-        std_target /= args.T
+        entropy_target = -torch.sum(y_prob * torch.log(y_prob), dim=1)
+        loss_domain = (entropy_target.mean()-entropy_source.mean()).pow(2)
 
-        entropy_target = -torch.sum(y_prob * torch.log(y_prob), dim=1).mean()
-        # loss_entropy = (entropy_target.mean()-entropy_source.mean()).pow(2)
-        loss_entropy = entropy_target
-        loss_std = std_target.mean()
-
-        loss = loss_nll + alpha*(args.lambda_entropy*loss_entropy+args.lambda_std*loss_std)
+        loss = loss_nll + 0.01*alpha*loss_domain
 
         loss.backward()
         optimizer.step()
 
         if batch_idx % args.log_interval == 0:
-            print('Train Epoch: {} [{}/{} ({:.2f}%)]\tLoss: {:.6f}\tSource Entropy: {:.4f} Target Entropy: {:.4f} Source Std: {:.4f} Target Std: {:.4f}'.format(
+            print('Train Epoch: {} [{}/{} ({:.2f}%)]\tLoss: {:.6f}\tTarget Entropy: {:.4f}'.format(
                 epoch, batch_idx * len(data), len(train_loader.dataset),
-                100. * batch_idx / len(train_loader), loss.item(),
-                entropy_source.item(), entropy_target.item(), std_source.mean().item(), std_target.mean().item()))
+                       100. * batch_idx / len(train_loader), loss.item(), entropy_target.mean().item()))
 
 
 def main():
     # Training settings
     parser = argparse.ArgumentParser(description='PyTorch MNIST Example')
-    parser.add_argument('--batch-size', type=int, default=64, metavar='N', help='input batch size for training (default: 64)')
+    parser.add_argument('--batch-size', type=int, default=100, metavar='N', help='input batch size for training (default: 64)')
     parser.add_argument('--test-batch-size', type=int, default=1000, metavar='N', help='input batch size for testing (default: 1000)')
-    parser.add_argument('--epochs', type=int, default=10, metavar='N', help='number of epochs to train (default: 10)')
+    parser.add_argument('--num-epochs', type=int, default=10, metavar='N', help='number of epochs to train (default: 10)')
     parser.add_argument('--lr', type=float, default=0.01, metavar='LR', help='learning rate (default: 0.01)')
     parser.add_argument('--momentum', type=float, default=0.5, metavar='M', help='SGD momentum (default: 0.5)')
     parser.add_argument('--no-cuda', action='store_true', default=False, help='disables CUDA training')
     parser.add_argument('--seed', type=int, default=1, metavar='S', help='random seed (default: 1)')
-    parser.add_argument('--log-interval', type=int, default=10, metavar='N', help='how many batches to wait before logging training status')
+    parser.add_argument('--log-interval', type=int, default=100, metavar='N', help='how many batches to wait before logging training status')
     parser.add_argument('--save-model', action='store_true', default=False, help='For Saving the current Model')
     parser.add_argument('--target-root', type=str, default='data/mnist_m/mnist_m_train')
     parser.add_argument('--target-list', type=str, default='data/mnist_m/mnist_m_train_labels.txt')
     parser.add_argument('--T', type=int, default=1, help='number of MC samples')
-    parser.add_argument('--lambda_entropy', type=float, default=0.1)
-    parser.add_argument('--lambda_std', type=float, default=0.1)
     args = parser.parse_args()
     use_cuda = not args.no_cuda and torch.cuda.is_available()
 
@@ -293,14 +290,13 @@ def main():
         batch_size=args.batch_size, shuffle=True, num_workers=8
     )
 
-    model = BCNN().to(device)
+    model = CNN().to(device)
     optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=1e-4)
 
-    for epoch in range(1, args.epochs + 1):
-        # bayes_train(args, model, device, train_loader, optimizer, epoch)
-        bayes_train_da(args, model, device, train_loader, target_loader, optimizer, epoch)
-        bayes_test(args, model, device, test_loader, 'Test')
-        bayes_test(args, model, device, target_loader, 'Target')
+    for epoch in range(1, args.num_epochs + 1):
+        train(args, model, device, train_loader, optimizer, epoch)
+        test(args, model, device, test_loader, 'Test')
+        test(args, model, device, target_loader, 'Target')
 
     if (args.save_model):
         torch.save(model.state_dict(), "mnist_cnn.pt")
