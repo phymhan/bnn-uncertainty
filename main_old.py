@@ -230,6 +230,7 @@ def bayes_train_da(args, model, device, train_loader, target_loader, optimizer, 
             y_pred, s_pred = model(data_target)
             y_noised = reparameterize(y_pred, s_pred)
             y_prob += F.softmax(y_noised, dim=1)
+        y_prob /= args.T
         entropy_target = -torch.sum(y_prob * torch.log(y_prob), dim=1)
         loss_domain = (entropy_target.mean()-entropy_source.mean()).pow(2)
 
