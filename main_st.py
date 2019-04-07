@@ -400,8 +400,8 @@ def main_old():
 
     if args.method == 'pseudo':
         selector = SoftmaxSelector(int(args.min_kept_ratio*args.batch_size), 0, args.threshold)
-        train_target = train_pseudo_online
-        # train_target = train
+        # train_target = train_pseudo_online
+        train_target = train
     else:
         # selector = EntropySelector(int(args.min_kept_ratio*args.batch_size), 0, args.threshold)
         selector = SoftmaxSelector(int(args.min_kept_ratio * args.batch_size), 0, args.threshold)
@@ -516,8 +516,8 @@ def main():
 
     if args.method == 'pseudo':
         selector = SoftmaxSelector(int(args.min_kept_ratio*args.batch_size), 0, args.threshold)
-        train_target = train_pseudo_online
-        # train_target = train
+        # train_target = train_pseudo_online
+        train_target = train
     else:
         # selector = EntropySelector(int(args.min_kept_ratio*args.batch_size), 0, args.threshold)
         selector = SoftmaxSelector(int(args.min_kept_ratio * args.batch_size), 0, args.threshold)
