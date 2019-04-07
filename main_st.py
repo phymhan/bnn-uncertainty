@@ -146,19 +146,23 @@ class ImageFolderDataset(Dataset):
         return len(self.data_list)
 
 
-class EmbeddingDataset(Dataset):
+class PseudoLabelDataset(Dataset):
     def __init__(self, data_root, data_list, transform=None):
         self.root = data_root
         self.transform = transform
         self.data_list = data_list
         self.paths = []
+        self.labels = []
         for l, _ in self.data_list:
             self.paths.append(os.path.join(self.root, l.split()[0]))
+            self.labels.append(int(l.split()[1]))
 
     def __getitem__(self, index):
         img = Image.open(self.paths[index]).convert('RGB')
         if self.transform is not None:
             img = self.transform(img)
+        # return image, pseudolabel, truelabel
+        # return img[1:2, ...], self.data_list[index][1], self.labels[index]
         return img[1:2, ...], self.data_list[index][1]
 
     def __len__(self):
@@ -166,6 +170,7 @@ class EmbeddingDataset(Dataset):
 
 
 def train(args, model, device, train_loader, optimizer, iteration, epoch, prompt, lambda_=1):
+    print('train')
     model.train()
     for batch_idx, (data, label) in enumerate(train_loader):
         data, label = data.to(device), label.to(device)
@@ -245,6 +250,7 @@ def train_entropy(args, model, device, train_loader, optimizer, iteration, epoch
 
 
 def train_pseudo_online(args, model, device, train_loader, optimizer, iteration, epoch, prompt, lambda_):
+    print('train pseudo online')
     model.train()
     for batch_idx, (data, label) in enumerate(train_loader):
         # data, label = data.to(device), label.to(device)
@@ -261,6 +267,28 @@ def train_pseudo_online(args, model, device, train_loader, optimizer, iteration,
         if batch_idx % args.log_interval == 0:
             y_prob = F.softmax(y, dim=1)
             print(f'>> online label acc {accuracy_score(label.detach().data.cpu().numpy(), label_online.detach().data.cpu().numpy()) * 100:.2f}')
+            print(f'--> label: {label[0]}, pred: {y_prob[0].data.cpu().numpy().argmax()}, prob: {y_prob[0].data.cpu().numpy().max():.4f}')
+            print('Iteration: {}, Train on {}, Epoch: {} [{}/{} ({:.0f}%)], Loss: {:.6f}'.format(
+                iteration, prompt, epoch, batch_idx * len(data), len(train_loader.dataset),
+                100. * batch_idx / len(train_loader), loss.item()))
+
+
+def train_pseudo_online2(args, model, device, train_loader, optimizer, iteration, epoch, prompt, lambda_):
+    print('train pseudo online 2')
+    model.train()
+    for batch_idx, (data, prob) in enumerate(train_loader):
+        data, prob = data.to(device), prob.to(device)
+        optimizer.zero_grad()
+        y = model(data)
+
+        _, label = prob.max(dim=1)
+        loss = F.cross_entropy(y, label)
+        loss.backward()
+
+        optimizer.step()
+        if batch_idx % args.log_interval == 0:
+            y_prob = F.softmax(y, dim=1)
+            # print(f'>> online label acc {accuracy_score(label.detach().data.cpu().numpy(), label_online.detach().data.cpu().numpy()) * 100:.2f}')
             print(f'--> label: {label[0]}, pred: {y_prob[0].data.cpu().numpy().argmax()}, prob: {y_prob[0].data.cpu().numpy().max():.4f}')
             print('Iteration: {}, Train on {}, Epoch: {} [{}/{} ({:.0f}%)], Loss: {:.6f}'.format(
                 iteration, prompt, epoch, batch_idx * len(data), len(train_loader.dataset),
@@ -289,6 +317,7 @@ def test(args, model, device, test_loader, prompt='Test'):
 
 
 def gen_label(args, model, device, train_loader, iteration, selector=None):
+    print('generate label')
     pseudo_list = []
 
     # model.train()
@@ -298,7 +327,9 @@ def gen_label(args, model, device, train_loader, iteration, selector=None):
             data, label = data.to(device), label.to(device)
             y = model(data)
             inds = selector(y)
-            pseudo_list += [line[ind] for ind in inds]
+            # pseudo_list += [line[ind] for ind in inds]  # FIXME: this is stupid
+            label = y.detach().data.cpu().numpy().argmax(axis=1)
+            pseudo_list += [(line[ind], label[ind]) for ind in inds]
 
             # y_prob = F.softmax(y, dim=1)
             # print(f'--> label: {label[0]}, pred: {y_prob[0].data.cpu().numpy().argmax()}, prob: {y_prob[0].data.cpu().numpy().max():.4f}')
@@ -312,6 +343,7 @@ def gen_label(args, model, device, train_loader, iteration, selector=None):
 
 
 def gen_softlabel(args, model, device, train_loader, iteration, selector=None, lambda_=0.):
+    print('generate softlabel')
     pseudo_list = []
 
     # model.train()
@@ -328,6 +360,8 @@ def gen_softlabel(args, model, device, train_loader, iteration, selector=None, l
             # print(f'--> label: {label[0]}, pred: {y_prob[0].data.cpu().numpy().argmax()}, prob: {y_prob[0].data.cpu().numpy().max():.4f}')
 
             if batch_idx % args.log_interval == 0:
+                y_prob = y_anneal
+                print(f'--> label: {label[0]}, pred: {y_prob[0].argmax()}, prob: {y_prob[0].max():.4f}')
                 print('Iteration {}, Pseudo-label: [{}/{} ({:.0f}%)]'.format(
                     iteration, batch_idx * len(data), len(train_loader.dataset),
                     100. * batch_idx / len(train_loader)))
@@ -388,7 +422,7 @@ def main_old():
                            ]),
                            return_line=True),
         batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, drop_last=True
-    )  # FIXME
+    )
     tar_loader_test = torch.utils.data.DataLoader(
         ImageFolderDataset(args.target_root_test, args.target_list_test,
                            transforms.Compose([
@@ -401,7 +435,7 @@ def main_old():
 
     if args.method == 'pseudo':
         selector = SoftmaxSelector(int(args.min_kept_ratio*args.batch_size), 0, args.threshold)
-        # train_target = train_pseudo_online
+        # train_target = train_pseudo_online2  # FIXME
         train_target = train
     else:
         # selector = EntropySelector(int(args.min_kept_ratio*args.batch_size), 0, args.threshold)
@@ -423,9 +457,9 @@ def main_old():
         test(args, model, device, src_loader_test, 'Source')
 
         # pseudo label
-        pseudo_list = gen_label(args, model, device, tar_loader, i, selector=selector)
+        pseudo_list = gen_label(args, model, device, tar_loader, i, selector=selector)  # FIXME
         tar_loader_train = torch.utils.data.DataLoader(
-            ImageFolderDataset(args.target_root, pseudo_list,
+            PseudoLabelDataset(args.target_root, pseudo_list,
                                transforms.Compose([
                                    transforms.Resize(28),
                                    transforms.ToTensor(),
@@ -450,119 +484,6 @@ def main_old():
 
     if (args.save_model):
         torch.save(model.state_dict(), "mnist_cnn.pt")
-
-
-# def main():
-#     # Training settings
-#     parser = argparse.ArgumentParser(description='PyTorch MNIST Example')
-#     parser.add_argument('--batch-size', type=int, default=100, metavar='N', help='input batch size for training (default: 64)')
-#     parser.add_argument('--test-batch-size', type=int, default=1000, metavar='N', help='input batch size for testing (default: 1000)')
-#     parser.add_argument('--num-epochs', type=int, default=10, metavar='N', help='number of epochs to train (default: 10)')
-#     parser.add_argument('--num-epochs-target', type=int, default=10, metavar='N', help='number of epochs to train (default: 10)')
-#     parser.add_argument('--num-iters', type=int, default=5)
-#     parser.add_argument('--lr', type=float, default=0.01, metavar='LR', help='learning rate (default: 0.01)')
-#     parser.add_argument('--momentum', type=float, default=0.5, metavar='M', help='SGD momentum (default: 0.5)')
-#     parser.add_argument('--no-cuda', action='store_true', default=False, help='disables CUDA training')
-#     parser.add_argument('--seed', type=int, default=1, metavar='S', help='random seed (default: 1)')
-#     parser.add_argument('--log-interval', type=int, default=100, metavar='N', help='how many batches to wait before logging training status')
-#     parser.add_argument('--save-model', action='store_true', default=False, help='For Saving the current Model')
-#     parser.add_argument('--target-root', type=str, default='data/mnist_m/mnist_m_train')
-#     parser.add_argument('--target-list', type=str, default='data/mnist_m/mnist_m_train_labels.txt')
-#     parser.add_argument('--target-root-test', type=str, default='data/mnist_m/mnist_m_test')
-#     parser.add_argument('--target-list-test', type=str, default='data/mnist_m/mnist_m_test_labels.txt')
-#     parser.add_argument('--T', type=int, default=1, help='number of MC samples')
-#     parser.add_argument('--threshold', type=float, default=0.8)
-#     parser.add_argument('--min_kept_ratio', type=float, default=0.1)
-#     parser.add_argument('--method', type=str, default='pseudo')
-#     parser.add_argument('--num-workers', type=int, default=4)
-#     args = parser.parse_args()
-#     use_cuda = not args.no_cuda and torch.cuda.is_available()
-#
-#     torch.manual_seed(args.seed)
-#
-#     device = torch.device("cuda" if use_cuda else "cpu")
-#
-#     kwargs = {'num_workers': 1, 'pin_memory': True} if use_cuda else {}
-#     src_loader = torch.utils.data.DataLoader(
-#         datasets.MNIST('data/mnist', train=True, download=True,
-#                        transform=transforms.Compose([
-#                            transforms.ToTensor(),
-#                            transforms.Normalize((0.1307,), (0.3081,))
-#                        ])),
-#         batch_size=args.batch_size, shuffle=True, **kwargs)
-#     src_loader_test = torch.utils.data.DataLoader(
-#         datasets.MNIST('data/mnist', train=False, transform=transforms.Compose([
-#             transforms.ToTensor(),
-#             transforms.Normalize((0.1307,), (0.3081,))
-#         ])),
-#         batch_size=args.test_batch_size, shuffle=True, **kwargs)
-#     tar_loader = torch.utils.data.DataLoader(
-#         ImageFolderDataset(args.target_root, args.target_list,
-#                            transforms.Compose([
-#                                transforms.Resize(28),
-#                                transforms.ToTensor(),
-#                                transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))
-#                            ]),
-#                            return_line=True),
-#         batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, drop_last=True
-#     )  # FIXME
-#     tar_loader_test = torch.utils.data.DataLoader(
-#         ImageFolderDataset(args.target_root_test, args.target_list_test,
-#                            transforms.Compose([
-#                                transforms.Resize(28),
-#                                transforms.ToTensor(),
-#                                transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))
-#                            ])),
-#         batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers
-#     )
-#
-#     if args.method == 'pseudo':
-#         selector = SoftmaxSelector(int(args.min_kept_ratio*args.batch_size), 0, args.threshold)
-#         # train_target = train_pseudo_online
-#         train_target = train
-#     else:
-#         # selector = EntropySelector(int(args.min_kept_ratio*args.batch_size), 0, args.threshold)
-#         selector = SoftmaxSelector(int(args.min_kept_ratio * args.batch_size), 0, args.threshold)
-#         train_target = train_entropy
-#
-#     model = CNN().to(device)
-#     optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=1e-4)
-#     # optimizer = optim.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.999))
-#
-#     tar_epoch_cnt = 0
-#
-#     for i in range(1, args.num_iters+1):
-#         # train on source
-#         for epoch in range(1, args.num_epochs+1):
-#             train(args, model, device, src_loader, optimizer, i, epoch, 'Source')
-#
-#         # test on source
-#         test(args, model, device, src_loader_test, 'Source')
-#
-#         # pseudo label
-#         pseudo_list = gen_softlabel(args, model, device, tar_loader, i, selector=selector, lambda_=0.99999)  # FIXME: fix lambda=0.99 here, change to store logits
-#         tar_loader_train = torch.utils.data.DataLoader(
-#             EmbeddingDataset(args.target_root, pseudo_list,
-#                                transforms.Compose([
-#                                    transforms.Resize(28),
-#                                    transforms.ToTensor(),
-#                                    transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))
-#                                ])),
-#             batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers
-#         )  # FIXME
-#
-#         # train on target
-#         for epoch in range(1, args.num_epochs_target+1):
-#             tar_epoch_cnt += 1
-#             lambda_ = 2. / (1. + np.exp(-10 * tar_epoch_cnt/(args.num_epochs_target*args.num_iters))) - 1
-#             # print(f'==> lambda = {lambda_:.4f}')
-#             train_target(args, model, device, tar_loader_train, optimizer, i, epoch, 'Target', 0.99)
-#
-#         # test on target
-#         test(args, model, device, tar_loader_test, 'Target')
-#
-#     if (args.save_model):
-#         torch.save(model.state_dict(), "mnist_cnn.pt")
 
 
 if __name__ == '__main__':
