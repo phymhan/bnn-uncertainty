@@ -10,6 +10,7 @@ import os
 from PIL import Image
 import numpy as np
 from sklearn.metrics import accuracy_score
+from utils import GrayscaleToRgb
 
 
 def reparameterize(mu, logvar):
@@ -45,6 +46,8 @@ class SoftmaxSelector(Selector):
         inds_sorted = probs.argsort()[::-1]
         if probs[inds_sorted[self._min_kept]] < threshold:
             threshold = probs[inds_sorted[self._min_kept]]
+        if self._max_kept > 0 and probs[inds_sorted[self._max_kept]] > threshold:
+            threshold = probs[inds_sorted[self._max_kept]]
         inds_selected = inds_sorted[np.where(probs_sorted > threshold)[0]]
         return inds_selected
 
@@ -71,7 +74,7 @@ class EntropySelector(Selector):
 class CNN(nn.Module):
     def __init__(self):
         super(CNN, self).__init__()
-        self.conv1 = nn.Conv2d(1, 20, 5, 1)
+        self.conv1 = nn.Conv2d(3, 20, 5, 1)
         self.conv2 = nn.Conv2d(20, 50, 5, 1)
         self.fc1 = nn.Linear(4 * 4 * 50, 500)
         self.fc2 = nn.Linear(500, 10)
@@ -92,7 +95,7 @@ class BCNN(nn.Module):
     def __init__(self):
         super(BCNN, self).__init__()
         p = 0.2
-        self.conv1 = nn.Conv2d(1, 20, 5, 1)
+        self.conv1 = nn.Conv2d(3, 20, 5, 1)
         self.drop1 = nn.Dropout2d(p)
         self.conv2 = nn.Conv2d(20, 50, 5, 1)
         self.drop2 = nn.Dropout2d(p)
@@ -138,9 +141,9 @@ class ImageFolderDataset(Dataset):
         if self.transform is not None:
             img = self.transform(img)
         if self.return_line:
-            return img[1:2, ...], lbl, self.data_list[index]
+            return img, lbl, self.data_list[index]
         else:
-            return img[1:2, ...], lbl
+            return img, lbl
 
     def __len__(self):
         return len(self.data_list)
@@ -161,9 +164,7 @@ class PseudoLabelDataset(Dataset):
         img = Image.open(self.paths[index]).convert('RGB')
         if self.transform is not None:
             img = self.transform(img)
-        # return image, pseudolabel, truelabel
-        # return img[1:2, ...], self.data_list[index][1], self.labels[index]
-        return img[1:2, ...], self.data_list[index][1]
+        return img, self.data_list[index][1]
 
     def __len__(self):
         return len(self.data_list)
@@ -316,35 +317,10 @@ def test(args, model, device, test_loader, prompt='Test'):
         100. * correct / len(test_loader.dataset)))
 
 
-def gen_label(args, model, device, train_loader, iteration, selector=None):
-    print('generate label')
-    pseudo_list = []
-
-    # model.train()
-    model.eval()
-    with torch.no_grad():
-        for batch_idx, (data, label, line) in enumerate(train_loader):
-            data, label = data.to(device), label.to(device)
-            y = model(data)
-            inds = selector(y)
-            # pseudo_list += [line[ind] for ind in inds]  # FIXME: this is stupid
-            label = y.detach().data.cpu().numpy().argmax(axis=1)
-            pseudo_list += [(line[ind], label[ind]) for ind in inds]
-
-            # y_prob = F.softmax(y, dim=1)
-            # print(f'--> label: {label[0]}, pred: {y_prob[0].data.cpu().numpy().argmax()}, prob: {y_prob[0].data.cpu().numpy().max():.4f}')
-
-            if batch_idx % args.log_interval == 0:
-                print('Iteration {}, Pseudo-label: [{}/{} ({:.0f}%)]'.format(
-                    iteration, batch_idx * len(data), len(train_loader.dataset),
-                    100. * batch_idx / len(train_loader)))
-        print(f'Iteration {iteration}, # of pseudo-labels: {len(pseudo_list)}')
-    return pseudo_list
-
-
-def gen_softlabel(args, model, device, train_loader, iteration, selector=None, lambda_=0.):
+def gen_label(args, model, device, train_loader, iteration, selector=None, lambda_=0.):
     print('generate softlabel')
-    pseudo_list = []
+    line_list = []
+    logit_list = []
 
     # model.train()
     model.eval()
@@ -352,24 +328,40 @@ def gen_softlabel(args, model, device, train_loader, iteration, selector=None, l
         for batch_idx, (data, label, line) in enumerate(train_loader):
             data, label = data.to(device), label.to(device)
             y = model(data)
-            y_anneal = F.softmax(y.detach() / (1 - lambda_), dim=1).data.cpu().numpy()
-            inds = selector(y)
-            pseudo_list += [(line[ind], y_anneal[ind]) for ind in inds]
+            # y_logit = y.detach().data.cpu().numpy()
 
-            # y_prob = F.softmax(y, dim=1)
-            # print(f'--> label: {label[0]}, pred: {y_prob[0].data.cpu().numpy().argmax()}, prob: {y_prob[0].data.cpu().numpy().max():.4f}')
+            line_list += line
+            logit_list += [y.data.cpu()[ind, :] for ind in range(data.size(0))]
 
             if batch_idx % args.log_interval == 0:
-                y_prob = y_anneal
+                y_prob = F.softmax(y.detach() / (1 - lambda_), dim=1).data.cpu().numpy()
                 print(f'--> label: {label[0]}, pred: {y_prob[0].argmax()}, prob: {y_prob[0].max():.4f}')
                 print('Iteration {}, Pseudo-label: [{}/{} ({:.0f}%)]'.format(
                     iteration, batch_idx * len(data), len(train_loader.dataset),
                     100. * batch_idx / len(train_loader)))
-        print(f'Iteration {iteration}, # of pseudo-labels: {len(pseudo_list)}')
+        inds_sel = selector(torch.stack(logit_list))
+        pseudo_list = [(line_list[ind], logit_list[ind]) for ind in inds_sel]
+        print(f'Iteration {iteration}, # of pseudo-labels: {len(inds_sel)}')
     return pseudo_list
 
 
-def main_old():
+def sel_label(args, logit_list):
+    print('select label')
+    min_kept = int(args.min_kept_ratio*len(logit_list))
+    logits = torch.stack(logit_list)
+    probs = F.softmax(logits, dim=1)
+    probs = np.max(probs.data.numpy(), axis=1)
+    probs_sorted = np.sort(probs)[::-1]
+    inds_sorted = probs.argsort()[::-1]
+    if probs[inds_sorted[min_kept]] < args.threshold:
+        threshold = probs[inds_sorted[min_kept]]
+    else:
+        threshold = args.threshold
+    inds_selected = inds_sorted[np.where(probs_sorted > threshold)[0]]
+    return inds_selected
+
+
+def main():
     # Training settings
     parser = argparse.ArgumentParser(description='PyTorch MNIST Example')
     parser.add_argument('--batch-size', type=int, default=100, metavar='N', help='input batch size for training (default: 64)')
@@ -383,15 +375,21 @@ def main_old():
     parser.add_argument('--seed', type=int, default=1, metavar='S', help='random seed (default: 1)')
     parser.add_argument('--log-interval', type=int, default=100, metavar='N', help='how many batches to wait before logging training status')
     parser.add_argument('--save-model', action='store_true', default=False, help='For Saving the current Model')
+    parser.add_argument('--source-root', type=str, default='datasets/mnist/train')
+    parser.add_argument('--source-list', type=str, default='sourcefiles/mnist_train.txt')
+    parser.add_argument('--source-root-test', type=str, default='datasets/mnist/test')
+    parser.add_argument('--source-list-test', type=str, default='sourcefiles/mnist_test.txt')
     parser.add_argument('--target-root', type=str, default='data/mnist_m/mnist_m_train')
     parser.add_argument('--target-list', type=str, default='data/mnist_m/mnist_m_train_labels.txt')
     parser.add_argument('--target-root-test', type=str, default='data/mnist_m/mnist_m_test')
     parser.add_argument('--target-list-test', type=str, default='data/mnist_m/mnist_m_test_labels.txt')
     parser.add_argument('--T', type=int, default=1, help='number of MC samples')
-    parser.add_argument('--threshold', type=float, default=0.8)
+    parser.add_argument('--threshold', type=float, default=0.95)
     parser.add_argument('--min_kept_ratio', type=float, default=0.1)
+    parser.add_argument('--max_kept_ratio', type=float, default=0.2)
     parser.add_argument('--method', type=str, default='pseudo')
     parser.add_argument('--num-workers', type=int, default=4)
+    parser.add_argument('--baseline', action='store_true')
     args = parser.parse_args()
     use_cuda = not args.no_cuda and torch.cuda.is_available()
 
@@ -404,15 +402,39 @@ def main_old():
         datasets.MNIST('data/mnist', train=True, download=True,
                        transform=transforms.Compose([
                            transforms.ToTensor(),
-                           transforms.Normalize((0.1307,), (0.3081,))
+                           transforms.Normalize((0.1307,), (0.3081,)),
+                           transforms.Lambda(lambda x: x.repeat(3, 1, 1))
                        ])),
         batch_size=args.batch_size, shuffle=True, **kwargs)
     src_loader_test = torch.utils.data.DataLoader(
         datasets.MNIST('data/mnist', train=False, transform=transforms.Compose([
             transforms.ToTensor(),
-            transforms.Normalize((0.1307,), (0.3081,))
+            transforms.Normalize((0.1307,), (0.3081,)),
+            transforms.Lambda(lambda x: x.repeat(3, 1, 1))
         ])),
         batch_size=args.test_batch_size, shuffle=True, **kwargs)
+    # src_loader = torch.utils.data.DataLoader(
+    #     ImageFolderDataset(args.source_root, args.source_list,
+    #                        transforms.Compose([
+    #                            #GrayscaleToRgb(),
+    #                            transforms.Resize(28),
+    #                            transforms.ToTensor(),
+    #                            transforms.Normalize(mean=(0.1307, 0.1307, 0.1307), std=(0.3081, 0.3081, 0.3081))
+    #                        ]),
+    #                        return_line=False),
+    #     batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, drop_last=True
+    # )
+    # src_loader_test = torch.utils.data.DataLoader(
+    #     ImageFolderDataset(args.source_root_test, args.source_list_test,
+    #                        transforms.Compose([
+    #                            #GrayscaleToRgb(),
+    #                            transforms.Resize(28),
+    #                            transforms.ToTensor(),
+    #                            transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))
+    #                        ]),
+    #                        return_line=False),
+    #     batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, drop_last=True
+    # )
     tar_loader = torch.utils.data.DataLoader(
         ImageFolderDataset(args.target_root, args.target_list,
                            transforms.Compose([
@@ -434,12 +456,12 @@ def main_old():
     )
 
     if args.method == 'pseudo':
-        selector = SoftmaxSelector(int(args.min_kept_ratio*args.batch_size), 0, args.threshold)
-        # train_target = train_pseudo_online2  # FIXME
-        train_target = train
+        selector = SoftmaxSelector(int(args.min_kept_ratio * len(tar_loader)), int(args.max_kept_ratio * len(tar_loader)), args.threshold)
+        train_target = train_pseudo_online2  # FIXME
+        # train_target = train
     else:
         # selector = EntropySelector(int(args.min_kept_ratio*args.batch_size), 0, args.threshold)
-        selector = SoftmaxSelector(int(args.min_kept_ratio * args.batch_size), 0, args.threshold)
+        selector = SoftmaxSelector(int(args.min_kept_ratio * len(tar_loader)), int(args.max_kept_ratio * len(tar_loader)), args.threshold)
         train_target = train_entropy
 
     model = CNN().to(device)
@@ -457,7 +479,9 @@ def main_old():
         test(args, model, device, src_loader_test, 'Source')
 
         # pseudo label
+
         pseudo_list = gen_label(args, model, device, tar_loader, i, selector=selector)  # FIXME
+        # pseudo_list_sel = [pseudo_list[ind] for ind in sel_label(args, pseudo_list)]
         tar_loader_train = torch.utils.data.DataLoader(
             PseudoLabelDataset(args.target_root, pseudo_list,
                                transforms.Compose([
@@ -469,15 +493,12 @@ def main_old():
         )  # FIXME
 
         # train on target
-        # for param_group in optimizer.param_groups:
-        #     param_group['lr'] = param_group['lr'] * 2
-        for epoch in range(1, args.num_epochs_target+1):
-            tar_epoch_cnt += 1
-            lambda_ = 2. / (1. + np.exp(-10 * tar_epoch_cnt/(args.num_epochs_target*args.num_iters))) - 1
-            # print(f'==> lambda = {lambda_:.4f}')
-            train_target(args, model, device, tar_loader_train, optimizer, i, epoch, 'Target', 0.99)
-        # for param_group in optimizer.param_groups:
-        #     param_group['lr'] = args.lr
+        if not args.baseline:
+            for epoch in range(1, args.num_epochs_target+1):
+                tar_epoch_cnt += 1
+                lambda_ = 2. / (1. + np.exp(-10 * tar_epoch_cnt/(args.num_epochs_target*args.num_iters))) - 1
+                # print(f'==> lambda = {lambda_:.4f}')
+                train_target(args, model, device, tar_loader_train, optimizer, i, epoch, 'Target', 0.99)
 
         # test on target
         test(args, model, device, tar_loader_test, 'Target')
@@ -487,4 +508,4 @@ def main_old():
 
 
 if __name__ == '__main__':
-    main_old()
+    main()
